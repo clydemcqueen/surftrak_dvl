@@ -1,0 +1,5 @@
+numpy
+pymavlink
+scipy
+matplotlib
+pandas

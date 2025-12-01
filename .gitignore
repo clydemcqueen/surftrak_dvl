@@ -1,0 +1,9 @@
+.idea/
+venv/
+__pycache__/
+
+testing/*.csv
+testing/*.pdf
+
+data/*.pdf
+data/*.csv
