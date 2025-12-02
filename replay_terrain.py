@@ -127,10 +127,14 @@ class LogReader:
         terrain_process_noise: float = 0.01,
         slope_process_noise: float = 0.01,
         gate_threshold: float = 9.0,
+        start_time: float | None = None,
+        stop_time: float | None = None,
     ):
         self.tlog_file = tlog_file
         self.verbose = verbose
         self.gate_threshold = gate_threshold
+        self.start_time = start_time
+        self.stop_time = stop_time
         self.dvl = DVLModel()
 
         # MAVLink messages that contain ROV state
@@ -219,6 +223,12 @@ class LogReader:
 
             msg_timestamp = getattr(msg, "_timestamp", 0.0)
             msg_type = msg.get_type()
+
+            if self.start_time is not None and msg_timestamp < self.start_time:
+                continue
+
+            if self.stop_time is not None and msg_timestamp > self.stop_time:
+                break
 
             if msg_type == "ATTITUDE":
                 # The ROV state is the EK3 output projected to T=now. Assume no message delay.
@@ -553,10 +563,10 @@ def main():
     parser.add_argument("--terrain-noise", type=float, default=0.01, help="Terrain process noise (default: 0.01)")
     parser.add_argument("--slope-noise", type=float, default=0.01, help="Slope process noise (default: 0.01)")
     parser.add_argument("--gate", type=float, default=9.0, help="Innovation gate threshold (default: 9.0)")
-    parser.add_argument("--tune", type=int, default=0, help="Number of times to re-run with different process noise")
-    parser.add_argument(
-        "--factor", type=float, default=0.5, help="Factor to multiply process noise by on each iteration (default: 0.8)"
-    )
+    parser.add_argument("--start", type=float, default=None, help="Ignore data before this time (default: None)")
+    parser.add_argument("--stop", type=float, default=None, help="Ignore data after this time (default: None)")
+    parser.add_argument("--tune", type=int, default=0, help="Auto-tune process noise, see code for details")
+    parser.add_argument("--factor", type=float, default=0.5, help="Process noise factor (default: 0.5)")
     args = parser.parse_args()
 
     if not os.path.exists(args.tlog_file):
@@ -581,7 +591,9 @@ def main():
         for i, terrain_noise in enumerate(terrain_noise_values):
             for j, slope_noise in enumerate(slope_noise_values):
                 print(f"++++++++++ TERRAIN PROCESS NOISE {terrain_noise}, SLOPE PROCESS NOISE {slope_noise}")
-                log_reader = LogReader(args.tlog_file, args.verbose, terrain_noise, slope_noise, args.gate)
+                log_reader = LogReader(
+                    args.tlog_file, args.verbose, terrain_noise, slope_noise, args.gate, args.start, args.stop
+                )
                 log_reader.parse_tlog()
                 log_reader.create_readings()
                 log_reader.run_ekf_forward()
@@ -599,7 +611,9 @@ def main():
         print(nees_averages)
 
     else:
-        log_reader = LogReader(args.tlog_file, args.verbose, args.terrain_noise, args.slope_noise, args.gate)
+        log_reader = LogReader(
+            args.tlog_file, args.verbose, args.terrain_noise, args.slope_noise, args.gate, args.start, args.stop
+        )
 
         start_time = time.time()
         log_reader.parse_tlog()
