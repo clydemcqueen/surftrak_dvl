@@ -149,26 +149,33 @@ class LogReader:
         # We drop some beam_sets, so len(readings) < len(beam_sets)
         self.readings: list[Reading] = []
 
-        print(f"TerrainEKF initial_terrain_z:        {100.0}")
-        print(f"TerrainEKF initial_slope_n:          {0.0}")
-        print(f"TerrainEKF initial_slope_e:          {0.0}")
-        print(f"TerrainEKF initial_terrain_variance: {100.0}")
-        print(f"TerrainEKF initial_slope_variance:   {1.0}")
-        print(f"TerrainEKF terrain_process_noise:    {terrain_process_noise}")
-        print(f"TerrainEKF slope_process_noise:      {slope_process_noise}")
-        print(f"TerrainEKF gate_threshold:           {gate_threshold}")
+        initial_terrain_z = 100.0  # Avoid rejection: est_terrain_z - rov_depth < 0.1
+        initial_slope_n = 0.0
+        initial_slope_e = 0.0
+        initial_terrain_variance = 100.0  # Avoid NIS rejection
+        initial_slope_variance = 1.0
+
+        if verbose:
+            print(f"TerrainEKF initial_terrain_z:        {initial_terrain_z}")
+            print(f"TerrainEKF initial_slope_n:          {initial_slope_n}")
+            print(f"TerrainEKF initial_slope_e:          {initial_slope_e}")
+            print(f"TerrainEKF initial_terrain_variance: {initial_terrain_variance}")
+            print(f"TerrainEKF initial_slope_variance:   {initial_slope_variance}")
+            print(f"TerrainEKF terrain_process_noise:    {terrain_process_noise}")
+            print(f"TerrainEKF slope_process_noise:      {slope_process_noise}")
+            print(f"TerrainEKF gate_threshold:           {gate_threshold}")
 
         # 3-state terrain EKF
         self.ekf = terrain_ekf.TerrainEKF(
             self.dvl,
-            initial_terrain_z=100.0,  # Avoid rejection: est_terrain_z - rov_depth < 0.1
-            initial_slope_n=0.0,
-            initial_slope_e=0.0,
-            initial_terrain_variance=100.0,  # Avoid NIS rejection
-            initial_slope_variance=1.0,
-            terrain_process_noise=terrain_process_noise,
-            slope_process_noise=slope_process_noise,
-            gate_threshold=gate_threshold,
+            initial_terrain_z,
+            initial_slope_n,
+            initial_slope_e,
+            initial_terrain_variance,
+            initial_slope_variance,
+            terrain_process_noise,
+            slope_process_noise,
+            gate_threshold,
         )
 
         # Gather EKF states for smoothing
@@ -192,6 +199,10 @@ class LogReader:
         # NEES metric average for this run
         self.nees_average = None
 
+        # MSE results
+        self.mse_surftrak1 = None
+        self.mse_surftrak2 = None
+
         # Stuff to graph 1
         # filter_results[i].timestamp == readings[i].timestamp
         self.filter_results: list[FilterResults] = []
@@ -206,7 +217,7 @@ class LogReader:
         We take advantage of the fact that the messages are published in id order: [0,1,2,3,4]
         Get ROV state at T=now from ATTITUDE and GLOBAL_POSITION_INT messages.
         """
-        print(f"==========\nParse {self.tlog_file}")
+        print(f"Parse {self.tlog_file}")
         mlog = mavutil.mavlink_connection(self.tlog_file)
 
         ds_msg_count = 0
@@ -273,15 +284,17 @@ class LogReader:
                     ds_dropped += drop
                     beams = []
 
-        print(f"  DVL DISTANCE_SENSOR messages found:       {ds_msg_count}")
-        print(f"  DVL DISTANCE_SENSOR messages dropped:     {ds_dropped} ({ds_dropped / ds_msg_count * 100:.2f}%)")
-        print(f"  DVL sets reconstructed:                   {len(self.beam_sets)}")
+        print(f"DVL DISTANCE_SENSOR messages found:       {ds_msg_count}")
+        print(f"DVL DISTANCE_SENSOR messages dropped:     {ds_dropped} ({ds_dropped / ds_msg_count * 100:.2f}%)")
+        print(f"DVL sets reconstructed:                   {len(self.beam_sets)}")
 
     def create_readings(self):
         """
         Create a list of readings with beam data and ROV state at the same timestamp.
         """
-        print("==========\nInterpolate ROV state")
+        if self.verbose:
+            print("Interpolate ROV state")
+
         for beam_set in self.beam_sets:
             t_capture = beam_set.t_capture
 
@@ -310,7 +323,9 @@ class LogReader:
             self.readings.append(Reading(beam_set, gpi, att, terrain_from_range))
 
     def run_ekf_forward(self):
-        print("==========\nRun terrain EKF forward")
+        if self.verbose:
+            print("Run EKF forward")
+
         last_t = None
         for reading in self.readings:
             # Convert Euler angles to rotation matrix using ZYX convention (yaw, pitch, roll)
@@ -341,7 +356,9 @@ class LogReader:
             self.filter_states.append(FilterState(reading.beams.t_capture, x_prior, P_prior, F, x_post, P_post))
 
     def run_smoother_backward(self):
-        print("==========\nRun smoother backward")
+        if self.verbose:
+            print("Run smoother backward")
+
         n = len(self.filter_states)
         if n == 0:
             return
@@ -416,8 +433,14 @@ class LogReader:
 
         return x_interp, P_interp
 
-    def calculate_nees(self):
-        print("==========\nProject EKF state forward to T=now")
+    def calculate_metrics(self):
+        if self.verbose:
+            print("Project EKF state forward to T=now and calculate metrics")
+
+        sq_error_sum_st1 = 0.0
+        sq_error_sum_st2 = 0.0
+        count = 0
+
         for reading, filter_state in zip(self.readings, self.filter_states):
             # t_capture = t_now - sensor_delay, recover t_now
             t_now = reading.beams.t_capture + self.dvl.sensor_delay
@@ -445,6 +468,13 @@ class LogReader:
                 filter_state.x_post, filter_state.P_post, self.ekf.Q_per_sec, vn_avg, ve_avg, self.dvl.sensor_delay
             )
 
+            # Measure the squared error between each method and "ground truth"
+            error_st1 = x_smooth_now[0, 0] - reading.terrain_from_range
+            error_st2 = x_smooth_now[0, 0] - x_proj[0]
+            sq_error_sum_st1 += error_st1**2
+            sq_error_sum_st2 += error_st2**2
+            count += 1
+
             # Calculate NEES metric
             error = x_proj - x_smooth_now.flatten()
             P_diff = P_proj - P_smooth_now
@@ -461,23 +491,34 @@ class LogReader:
             self.ground_truths.append(SmoothedState(t_now, x_smooth_now, P_smooth_now))
             self.projections.append(Projection(t_now, x_proj, float(nees_metric)))
 
+        if count > 0:
+            self.mse_surftrak1 = sq_error_sum_st1 / count
+            self.mse_surftrak2 = sq_error_sum_st2 / count
+            print(f"MSE current:  {self.mse_surftrak1:.6f}")
+            print(f"MSE proposed: {self.mse_surftrak2:.6f}")
+            if self.mse_surftrak1 > 0:
+                improvement = (self.mse_surftrak1 - self.mse_surftrak2) / self.mse_surftrak1 * 100
+                print(f"Improvement:    {improvement:.2f}%")
+
         # Calculate the average NEES (remove NaNs)
         # Average ~= 3: P_proj accurately predicts the error
         # Average >> 3: filter is overconfident, increase process noise
         # Average << 3: filter is conservative, decrease process noise
         self.nees_average = np.average([p.nees_metric for p in self.projections])
         print(f"NEES average: {self.nees_average:.2f}")
-        if self.nees_average > 5.0:
-            print("Filter is overconfident, increase Q_per_sec?")
-        elif self.nees_average < 1.0:
-            print("Filter is conservative, decrease Q_per_sec?")
+        if self.verbose:
+            if self.nees_average > 5.0:
+                print("Filter is overconfident, increase Q_per_sec?")
+            elif self.nees_average < 1.0:
+                print("Filter is conservative, decrease Q_per_sec?")
 
     def create_result_records(self):
         """
         Copy data into named tuples for easy CSV export. We write 2 tables so that the timestamps line up in graphing
         tools. This makes it easy to compare raw, filtered, smoothed ("ground truth") and projected values.
         """
-        print("==========\nCreate result records")
+        if self.verbose:
+            print("Create result records")
 
         # Raw sensor readings and TerrainEKF outputs at t_capture = t_now - sensor_delay
         for reading, filter_state in zip(self.readings, self.filter_states):
@@ -536,7 +577,6 @@ class LogReader:
             [self.filter_results, self.projection_results],
         ):
             output_file = f"{base_name}_{prefix}.csv"
-            print(f"==========\nWrite results to {output_file}")
 
             # Add a prefix to all fields (except timestamp), this makes plotjuggler a bit easier to use
             header = [f"{prefix}.{field}" if field != "timestamp" else field for field in fields]
@@ -598,7 +638,7 @@ def main():
                 log_reader.create_readings()
                 log_reader.run_ekf_forward()
                 log_reader.run_smoother_backward()
-                log_reader.calculate_nees()
+                log_reader.calculate_metrics()
                 nees_averages[i, j] = log_reader.nees_average
 
         print("++++++++++")
@@ -615,30 +655,38 @@ def main():
             args.tlog_file, args.verbose, args.terrain_noise, args.slope_noise, args.gate, args.start, args.stop
         )
 
-        start_time = time.time()
-        log_reader.parse_tlog()
-        end_time = time.time()
-        print(f"Time taken by parse_tlog: {end_time - start_time:.4f} seconds")
+        if args.verbose:
+            start_time = time.time()
+            log_reader.parse_tlog()
+            end_time = time.time()
+            print(f"Time taken by parse_tlog: {end_time - start_time:.4f} seconds")
 
-        start_time = time.time()
-        log_reader.create_readings()
-        end_time = time.time()
-        print(f"Time taken by create_readings: {end_time - start_time:.4f} seconds")
+            start_time = time.time()
+            log_reader.create_readings()
+            end_time = time.time()
+            print(f"Time taken by create_readings: {end_time - start_time:.4f} seconds")
 
-        start_time = time.time()
-        log_reader.run_ekf_forward()
-        end_time = time.time()
-        print(f"Time taken by run_ekf_forward: {end_time - start_time:.4f} seconds")
+            start_time = time.time()
+            log_reader.run_ekf_forward()
+            end_time = time.time()
+            print(f"Time taken by run_ekf_forward: {end_time - start_time:.4f} seconds")
 
-        start_time = time.time()
-        log_reader.run_smoother_backward()
-        end_time = time.time()
-        print(f"Time taken by run_smoother_backward: {end_time - start_time:.4f} seconds")
+            start_time = time.time()
+            log_reader.run_smoother_backward()
+            end_time = time.time()
+            print(f"Time taken by run_smoother_backward: {end_time - start_time:.4f} seconds")
 
-        start_time = time.time()
-        log_reader.calculate_nees()
-        end_time = time.time()
-        print(f"Time taken by calculate_nees: {end_time - start_time:.4f} seconds")
+            start_time = time.time()
+            log_reader.calculate_metrics()
+            end_time = time.time()
+            print(f"Time taken by calculate_metrics: {end_time - start_time:.4f} seconds")
+
+        else:
+            log_reader.parse_tlog()
+            log_reader.create_readings()
+            log_reader.run_ekf_forward()
+            log_reader.run_smoother_backward()
+            log_reader.calculate_metrics()
 
         if args.csv:
             log_reader.create_result_records()

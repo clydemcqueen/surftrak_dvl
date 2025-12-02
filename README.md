@@ -2,14 +2,14 @@
 
 ## Motivation
 
-We run transects 100 cm above the seafloor to capture images for scientific purposes.
-The range, or HAGL (height above ground level), should be as consistent as possible.
+The Seattle Aquarium runs transects 1 meter above the seafloor to capture images for scientific purposes.
+The range, or HAGL (height above ground level), should be as consistent as possible during the transect.
 This is partially automated using the [SURFTRAK](https://github.com/clydemcqueen/ardusub_surftrak) flight mode, which adjusts target depth based on rangefinder readings.
 
 ## The Problem: Sensor Delay
 
 As noted in the SURFTRAK [documentation](https://github.com/clydemcqueen/ardusub_surftrak#sensor-notes), sensor delays (e.g., ~300ms for the Water Linked A50) cause oscillations.
-HAGL is calculated as `terrain_z - rov_z`; while `rov_z` is known at `T=now`, the range measurement reflects the state at `T-delay`.
+HAGL is calculated as `rov_z - terrain_z`; while `rov_z` is known at `t_now`, the range measurement reflects the state at `t_capture`.
 This latency, combined with varying delays and sensor noise, limits the effectiveness of simple feedback loops or PID tuning.
 
 ## Proposed Solution
@@ -34,37 +34,71 @@ We use a 3-state EKF: `[terrain_z, slope_n, slope_e]`.
 
 **Update Step:** Uses beam geometry to predict measurements. NIS is used to reject individual beam readings that deviate significantly from the planar terrain model.
 
-**Projection:** The TerrainEKF runs at `T-delay`. We can project `terrain_z` forward to `T=now`, and then compute HAGL at `T=now`.
+**Projection:** The TerrainEKF runs at `t_capture`. We can project `terrain_z` forward to `t_now` to get a better estimate of HAGL at `t_now`.
 
 ## Log Analysis
 
-Data collected from Elliott Bay on 2025-10-08 with beam splitter running is available in the `data` directory.
+A subset of the data collected from Elliott Bay on 2025-10-08 (with beam splitter running) is available in the `data` directory:
+* transect1.tlog: The ROV has SURFTRAK engaged and is moving up-slope from south to north at a constant rate of 10 cm/s.
+* transect2.tlog: Similar to transect1.
+* short.tlog: The ROV is returning to the vessel west-to-east, running fairly quickly close to the surface.
 
-The `replay_terrain.py` script reconstructs DVL readings and runs the TerrainEKF from tlog data (`DISTANCE_SENSOR`, `ATTITUDE`, `GLOBAL_POSITION_INT`). The results are saved in two csv files:
-1. `*_TEKF.csv` - EKF inputs and outputs at `T-delay`
-2. `*_TPRJ.csv` - EKF outputs projected forward to `T-now`
+We have no ground truth for the terrain, but we can estimate it using the log data, the TerrainEKF and an RTS smoother.
+Using this estimate, we can calculate the MSE for the current and proposed terrain estimation methods.
 
-### Usage
+Results:
+~~~
+$ ./replay_terrain.py data/transect1.tlog
+Parse data/transect1.tlog
+DVL DISTANCE_SENSOR messages found:       31900
+DVL DISTANCE_SENSOR messages dropped:     0 (0.00%)
+DVL sets reconstructed:                   6380
+MSE current:  0.000266
+MSE proposed: 0.000116
+Improvement:    56.31%
+NEES average: 0.16
 
-```bash
-./replay_terrain.py --csv data/transect1.tlog
-./graph_results.py data/transect1_TEKF.csv
-```
+$ ./replay_terrain.py data/transect2.tlog
+Parse data/transect2.tlog
+DVL DISTANCE_SENSOR messages found:       28545
+DVL DISTANCE_SENSOR messages dropped:     0 (0.00%)
+DVL sets reconstructed:                   5709
+MSE current:  0.000226
+MSE proposed: 0.000064
+Improvement:    71.43%
+NEES average: 0.14
 
-### Results (TODO)
+$ ./replay_terrain.py data/short.tlog
+Parse data/short.tlog
+DVL DISTANCE_SENSOR messages found:       9200
+DVL DISTANCE_SENSOR messages dropped:     25 (0.27%)
+DVL sets reconstructed:                   1835
+MSE current:  0.050239
+MSE proposed: 0.001470
+Improvement:    97.07%
+NEES average: 0.90
+~~~
+
+In all cases the MSE is substantially lower for the proposed method.
+
+We can also plot the results:
+
+~~~
+./replay_terrain.py --csv data/transect2.tlog
+./graph_results.py data/transect2_TEKF.csv
+~~~
 
 This is from `transect2_graph2.pdf`:
 
 ![transect2_graph2](images/transect2_graph2.png)
 
-In both transects the ROV is running up-slope from south to north at a constant rate of 10 cm/s.
-The slope is initially significant, but drops substantially at T=8100 in the graph.
-Even with the dampened response, you can see that the ROV depth (and therefore HAGL) oscillates quite a bit in the steeper part of the transect.
-Note that the TerrainEKF quickly learns the slope.
+The slope is initially significant but drops substantially at T=8100 in the graph.
+Even with the dampened response, the ROV depth oscillation is substantially worse in the steeper part of the transect,
+which we would expect based on the current design. 
 
 This is from `short_graph2.pdf`:
 
 ![short_graph2](images/short_graphs2.png)
 
-In this segment, the ROV is returning to the vessel west-to-east. It is fairly close to the surface, and at T=595 one of the thrusters
-forces some air into the water column, interrupting 2 of the 4 sonar beams. The readings are rejected by the EKF.
+The ROV is fairly close to the surface. From the video we can see that it pauses at T=595 and one of the thrusters
+forces some air into the water column, interrupting two of the four sonar beams. The bad readings are rejected by the EKF.

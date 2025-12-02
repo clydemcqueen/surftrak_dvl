@@ -64,7 +64,7 @@ class TestLogReader(unittest.TestCase):
         log_reader.create_readings()
         log_reader.run_ekf_forward()
         log_reader.run_smoother_backward()
-        log_reader.calculate_nees()
+        log_reader.calculate_metrics()
         log_reader.create_result_records()
 
         # Expect to drop 2 sets because we can't extrapolate
