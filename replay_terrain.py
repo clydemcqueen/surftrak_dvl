@@ -124,6 +124,7 @@ class LogReader:
         self,
         tlog_file: str,
         verbose: bool,
+        use_boot_time: bool,
         terrain_process_noise: float = 0.01,
         slope_process_noise: float = 0.01,
         gate_threshold: float = 9.0,
@@ -132,10 +133,12 @@ class LogReader:
     ):
         self.tlog_file = tlog_file
         self.verbose = verbose
+        self.use_boot_time = use_boot_time
         self.gate_threshold = gate_threshold
         self.start_time = start_time
         self.stop_time = stop_time
         self.dvl = DVLModel()
+        self.rtc_shift_min = None
 
         # MAVLink messages that contain ROV state
         self.gpi_msgs: list[sub_state.GlobalPosInt] = []
@@ -211,6 +214,11 @@ class LogReader:
         # projection_results[i].timestamp == projections[i].timestamp
         self.projection_results: list[ProjectionResults] = []
 
+    def _update_rtc_shift(self, msg_timestamp, time_boot_ms):
+        rtc_shift = msg_timestamp - time_boot_ms / 1000.0
+        if self.rtc_shift_min is None or rtc_shift < self.rtc_shift_min:
+            self.rtc_shift_min = rtc_shift
+
     def parse_tlog(self):
         """
         Parse a tlog file for DISTANCE_SENSOR messages and reconstruct the DVL reading.
@@ -243,14 +251,20 @@ class LogReader:
 
             if msg_type == "ATTITUDE":
                 # The ROV state is the EK3 output projected to T=now. Assume no message delay.
-                self.att_msgs.append(sub_state.Attitude(msg_timestamp, msg.roll, msg.pitch, msg.yaw))
+                self.att_msgs.append(
+                    sub_state.Attitude(msg_timestamp, msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw)
+                )
+                self._update_rtc_shift(msg_timestamp, msg.time_boot_ms)
 
             elif msg_type == "GLOBAL_POSITION_INT":
                 # alt: mm to meters, up -> down
                 # vn, ve: cm/s to m/s
                 self.gpi_msgs.append(
-                    sub_state.GlobalPosInt(msg_timestamp, -msg.relative_alt / 1000.0, msg.vx / 100.0, msg.vy / 100.0)
+                    sub_state.GlobalPosInt(
+                        msg_timestamp, msg.time_boot_ms, -msg.relative_alt / 1000.0, msg.vx / 100.0, msg.vy / 100.0
+                    )
                 )
+                self._update_rtc_shift(msg_timestamp, msg.time_boot_ms)
 
             elif msg_type == "DISTANCE_SENSOR":
                 # Ignore messages from ArduSub, these are duplicates
@@ -285,8 +299,13 @@ class LogReader:
                     beams = []
 
         print(f"DVL DISTANCE_SENSOR messages found:       {ds_msg_count}")
-        print(f"DVL DISTANCE_SENSOR messages dropped:     {ds_dropped} ({ds_dropped / ds_msg_count * 100:.2f}%)")
+        if ds_msg_count > 0:
+            print(f"DVL DISTANCE_SENSOR messages dropped:     {ds_dropped} ({ds_dropped / ds_msg_count * 100:.2f}%)")
+        else:
+            print(f"DVL DISTANCE_SENSOR messages dropped:     {ds_dropped}")
         print(f"DVL sets reconstructed:                   {len(self.beam_sets)}")
+        if self.rtc_shift_min is not None:
+            print(f"Min rtc_shift:                           {self.rtc_shift_min:.6f}")
 
     def create_readings(self):
         """
@@ -295,12 +314,28 @@ class LogReader:
         if self.verbose:
             print("Interpolate ROV state")
 
+        gpi_msgs = self.gpi_msgs
+        att_msgs = self.att_msgs
+
+        if self.use_boot_time and self.rtc_shift_min is not None:
+            print("Using time_boot_ms for interpolation")
+            gpi_msgs = [
+                sub_state.GlobalPosInt(
+                    g.time_boot_ms / 1000.0 + self.rtc_shift_min, g.time_boot_ms, g.alt, g.vn, g.ve
+                )
+                for g in self.gpi_msgs
+            ]
+            att_msgs = [
+                sub_state.Attitude(a.time_boot_ms / 1000.0 + self.rtc_shift_min, a.time_boot_ms, a.roll, a.pitch, a.yaw)
+                for a in self.att_msgs
+            ]
+
         for beam_set in self.beam_sets:
             t_capture = beam_set.t_capture
 
             # Interpolate the ROV state at t_capture
-            gpi = sub_state.lookup(self.gpi_msgs, t_capture)
-            att = sub_state.lookup(self.att_msgs, t_capture)
+            gpi = sub_state.lookup(gpi_msgs, t_capture)
+            att = sub_state.lookup(att_msgs, t_capture)
 
             if gpi is None or att is None:
                 if self.verbose:
@@ -598,6 +633,7 @@ class LogReader:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tlog_file", help="Path to the .tlog file")
+    parser.add_argument("--boot-time", action="store_true", help="Use time_boot_ms for interpolation")
     parser.add_argument("--csv", action="store_true", help="Write CSV output")
     parser.add_argument("--verbose", action="store_true", help="Explain message drop reasons")
     parser.add_argument("--terrain-noise", type=float, default=0.01, help="Terrain process noise (default: 0.01)")
@@ -632,7 +668,14 @@ def main():
             for j, slope_noise in enumerate(slope_noise_values):
                 print(f"++++++++++ TERRAIN PROCESS NOISE {terrain_noise}, SLOPE PROCESS NOISE {slope_noise}")
                 log_reader = LogReader(
-                    args.tlog_file, args.verbose, terrain_noise, slope_noise, args.gate, args.start, args.stop
+                    args.tlog_file,
+                    args.verbose,
+                    args.boot_time,
+                    terrain_noise,
+                    slope_noise,
+                    args.gate,
+                    args.start,
+                    args.stop,
                 )
                 log_reader.parse_tlog()
                 log_reader.create_readings()
@@ -652,7 +695,14 @@ def main():
 
     else:
         log_reader = LogReader(
-            args.tlog_file, args.verbose, args.terrain_noise, args.slope_noise, args.gate, args.start, args.stop
+            args.tlog_file,
+            args.verbose,
+            args.boot_time,
+            args.terrain_noise,
+            args.slope_noise,
+            args.gate,
+            args.start,
+            args.stop,
         )
 
         if args.verbose:
