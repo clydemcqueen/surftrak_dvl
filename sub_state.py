@@ -6,6 +6,7 @@ class GlobalPosInt(typing.NamedTuple):
     """Data we need from a GLOBAL_POSITION_INT message."""
 
     t_now: float
+    time_boot_ms: int
     alt: float
     vn: float
     ve: float
@@ -15,6 +16,7 @@ class Attitude(typing.NamedTuple):
     """Data we need from an ATTITUDE message."""
 
     t_now: float
+    time_boot_ms: int
     roll: float
     pitch: float
     yaw: float

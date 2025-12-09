@@ -38,7 +38,7 @@ class TestLogReader(unittest.TestCase):
 
         try:
             # Create a LogReader instance and parse the log
-            log_reader = LogReader(self.test_tlog_path, verbose=False)
+            log_reader = LogReader(self.test_tlog_path, verbose=False, use_boot_time=False)
             log_reader.parse_tlog()
 
             # Get the output
@@ -59,7 +59,7 @@ class TestLogReader(unittest.TestCase):
 
     def test_small_tlog_data_collection(self):
         """Test that LogReader collects data from small.tlog"""
-        log_reader = LogReader(self.test_tlog_path, verbose=False)
+        log_reader = LogReader(self.test_tlog_path, verbose=False, use_boot_time=False)
         log_reader.parse_tlog()
         log_reader.create_readings()
         log_reader.run_ekf_forward()
@@ -74,7 +74,7 @@ class TestLogReader(unittest.TestCase):
         """
         Test that the timestamps for beams, gpi, and att in each reading are the same.
         """
-        log_reader = LogReader(self.test_tlog_path, verbose=False)
+        log_reader = LogReader(self.test_tlog_path, verbose=False, use_boot_time=False)
         log_reader.parse_tlog()
         log_reader.create_readings()
 
