@@ -251,9 +251,7 @@ class LogReader:
 
             if msg_type == "ATTITUDE":
                 # The ROV state is the EK3 output projected to T=now. Assume no message delay.
-                self.att_msgs.append(
-                    sub_state.Attitude(msg_timestamp, msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw)
-                )
+                self.att_msgs.append(sub_state.Attitude(msg_timestamp, msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw))
                 self._update_rtc_shift(msg_timestamp, msg.time_boot_ms)
 
             elif msg_type == "GLOBAL_POSITION_INT":
@@ -320,9 +318,7 @@ class LogReader:
         if self.use_boot_time and self.rtc_shift_min is not None:
             print("Using time_boot_ms for interpolation")
             gpi_msgs = [
-                sub_state.GlobalPosInt(
-                    g.time_boot_ms / 1000.0 + self.rtc_shift_min, g.time_boot_ms, g.alt, g.vn, g.ve
-                )
+                sub_state.GlobalPosInt(g.time_boot_ms / 1000.0 + self.rtc_shift_min, g.time_boot_ms, g.alt, g.vn, g.ve)
                 for g in self.gpi_msgs
             ]
             att_msgs = [
